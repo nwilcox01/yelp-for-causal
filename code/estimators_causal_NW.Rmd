@@ -1,0 +1,252 @@
+---
+title: "Estimators"
+output: pdf_document
+---
+
+## Read in data.
+```{r}
+library(readr)
+las_vegas <- read_csv("/Users/naomiwilcox/Downloads/yelp-for-causal-master 5/data/las-vegas-yelp.csv")[,-1]
+head(las_vegas)
+```
+
+Create the intervention node.
+
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+las_vegas <- las_vegas %>% mutate(star_intervention=ifelse(stars>=3.5, 1, 0))
+```
+
+Remove any NA's.
+```{r}
+las_vegas <- las_vegas[complete.cases(las_vegas),]
+# length(complete.cases(las_vegas)) # 3644 complete
+```
+
+I'm going to make age and review count into bins.
+```{r}
+# * REVIEW COUNT BINS
+# reviews     <- sort(las_vegas %>% pull(review_count))
+# percentiles <- sapply(seq(0, 1, 0.1), function(x) quantile(reviews, x))[-1]
+# 
+# review_percentiles <- rep(NULL, times=length(reviews))
+# for (ix in 1:length(percentiles)) {
+#   this_per <- rev(percentiles)[ix]
+#   these_ix <- which(reviews<this_per)
+#   review_percentiles[these_ix] <- 11-ix
+# }
+# 
+# review_bins <- cbind(review_count=reviews, review_percentiles=review_percentiles)
+# las_vegas <- merge(las_vegas, data.frame(review_bins), by="review_count")
+```
+
+```{r}
+# * REVIEW AGE BINS
+# ages        <- sort(las_vegas %>% pull(age))
+# percentiles <- sapply(seq(0, 1, 0.1), function(x) quantile(ages, x))[-1]
+# 
+# age_percentiles <- rep(NULL, times=length(reviews))
+# for (ix in 1:length(percentiles)) {
+#   this_per <- rev(percentiles)[ix]
+#   these_ix <- which(ages<this_per)
+#   age_percentiles[these_ix] <- 11-ix
+# }
+# 
+# age_bins <- cbind(age=ages, age_percentiles=age_percentiles)
+# las_vegas <- merge(las_vegas, data.frame(age_bins), by="age")
+```
+
+
+```{r}
+las_vegas <- las_vegas %>% mutate(age_binary=age>median(age),
+                                  review_binary=review_count>median(review_count))
+```
+
+## Simple substitution estimator.
+I used R Lab 2.
+```{r}
+e_a1 <- las_vegas %>% filter(star_intervention==1) %>%
+  group_by(neighborhood, american, chain, age_binary, review_binary) %>%
+  summarize(e.ya1=mean(open_2019))
+# nrow(e_a1)
+e_a0 <- las_vegas %>% filter(star_intervention==0) %>%
+  group_by(neighborhood, american, chain, age_binary, review_binary) %>%
+  summarize(e.ya0=mean(open_2019))
+# nrow(e_a0)
+probs <- las_vegas %>% 
+  group_by(neighborhood, american, chain) %>% 
+  summarize(p=n()/nrow(las_vegas))
+expectations <- merge(merge(e_a1, e_a0), probs)
+expectations <- expectations %>% mutate(weighted.avg=(e.ya1-e.ya0)*p)
+psi.p0 <- sum(expectations$weighted.avg)
+psi.p0*100
+```
+
+## IPTW.
+```{r}
+library(nnet)
+gAW_reg  <- multinom(star_intervention~neighborhood+american+review_count+age, data=las_vegas)
+gAW_pred <- predict(gAW_reg, type="probs")
+gAW <- as.numeric(gAW_pred)
+wt  <- gAW^-1
+
+# the weighted empirical mean outcome for restaurants with >=3.5 stars
+# minus the weighted empirical mean for restaurants with <3.5 stars
+IPTW <- mean(wt*as.numeric(las_vegas$star_intervention==1)*las_vegas$open_2019) -
+        mean(wt*as.numeric(las_vegas$star_intervention==0)*las_vegas$open_2019)
+IPTW
+
+```
+
+
+```{r}
+IPTW_or <- mean(wt*as.numeric(las_vegas$star_intervention==1)*las_vegas$open_2019) /
+  mean(wt*as.numeric(las_vegas$star_intervention==1)) -
+  mean(wt*as.numeric(las_vegas$star_intervention==0)*las_vegas$open_2019) / 
+  mean(wt*as.numeric(las_vegas$star_intervention==0))
+IPTW_or
+```
+
+#  Formal assessmment of positivity
+
+Provide some formal assessment of the positivity assumption. Evaluate the distribution of your estimated propensity score $g_n(A = 1|W_i), i = 1, ..., n,$ and corresponding non-stabilized weights (as well as of your stabilized weights if you use stabilized weights to fit an MSM). Consider evaluating sensitivity to different truncation levels for gn. Note that for TMLE, bounding or truncating gn away from 0 is recommended on the basis of both theory and finite sample performance; for IPTW it can help or hurt. Report how for how many observations was $g_n(A|Wi)$ truncated. 
+
+
+```{r}
+# convert to data frame
+wt <- as.data.frame(wt)
+
+# look at distribution of weights
+ggplot(wt, aes(wt)) + geom_histogram(fill = "blue", col = "black") + theme_minimal() + 
+  labs(title = "Distribution of weights")
+
+# truncate large weights ARBITRARILY at 4
+wt.trunc <- wt
+wt.trunc[ wt.trunc > 4] = 4
+
+# checking if it worked
+summary(wt.trunc4)
+
+# evaluate the IPTW estimand with the truncated weights (at 4)
+IPTW.tr4 <- mean(wt.trunc*as.numeric(las_vegas$star_intervention==1)*las_vegas$open_2019) -
+  mean(wt.trunc*as.numeric(las_vegas$star_intervention==0)*las_vegas$open_2019)
+IPTW.tr4
+
+# truncated weights (at 5)
+wt.trunc<- wt
+wt.trunc[ wt.trunc > 5] = 5
+
+# truncated weights at 5
+IPTW.tr5 <- mean(wt.trunc*as.numeric(las_vegas$star_intervention==1)*las_vegas$open_2019) -
+  mean(wt.trunc*as.numeric(las_vegas$star_intervention==0)*las_vegas$open_2019)
+IPTW.tr5
+
+```
+
+## SuperLearner TMLE
+
+```{r sl_setup}
+library(SuperLearner)
+library(ltmle)
+# specify the library
+sl_lib <- c("SL.glm", "SL.rpart", "SL.rpartPrune", "SL.glmnet",
+            "SL.mean", "SL.ranger")
+# turn the covaraites into binary values
+las_vegas <- las_vegas %>%
+  mutate(
+    american = as.numeric(american),
+    chain = as.numeric(chain),
+    age_binary = as.numeric(age_binary),
+    review_binary = as.numeric(review_binary)
+  )
+set.seed(252)
+```
+
+In this section, SuperLearner is used to implement the G-comptutation, IPTW and
+TMLE estimators. The emprirical risk of each estimator is evaluted through 
+cross-validation. The mean estimator is also impletmented as a benchmark.
+
+First, the simple substitution estimator is calculated using `SuperLearner`.
+```{r superlearner_gcomp, cache=TRUE}
+library(SuperLearner)
+library(glmnet)
+library(ltmle)
+
+
+cov_int_df <- las_vegas %>% 
+  dplyr::select(american, chain, age_binary, review_binary, star_intervention) %>%
+  as.data.frame
+# estimate qbar_0(A, W)
+qbar_sl <- SuperLearner(
+  Y = las_vegas$open_2019,
+  X = cov_int_df,
+  SL.library = sl_lib,
+  family = "binomial"
+)
+
+# estimate the outcomes under different exposures
+all_above_df <- las_vegas %>%
+  dplyr::select(american, chain, age_binary, review_binary,
+         star_intervention) %>%
+  mutate(star_intervention = 1) %>%
+  as.data.frame
+qbar_1W <- predict(qbar_sl, newdata = all_above_df)$pred
+all_below_df <- las_vegas %>%
+  dplyr::select(american, chain, age_binary, review_binary,
+         star_intervention) %>%
+  mutate(star_intervention = 0)%>%
+  as.data.frame
+qbar_0W <- predict(qbar_sl, newdata = all_below_df)$pred
+# simple sub estimator
+Psi_hat_ss <- mean(qbar_1W - qbar_0W)
+```
+The estimate is $\hat{\Psi}_{ss}(P_n) =$ 
+`r round(Psi_hat_ss, 3)`.
+
+Next, the IPTW and stabilized IPTW estimators are computed. 
+
+```{r superlearner_iptw, cache = TRUE}
+# estimate the treatment mechanism
+ghat_sl <- SuperLearner(Y = las_vegas$star_intervention,
+                        X = cov_int_df %>% dplyr::select(-star_intervention),
+                        SL.library = sl_lib, family = "binomial")
+# fit the treatment mechanism in the counterfactual world
+ghat_1W <- ghat_sl$SL.predict
+ghat_0W <- 1 - ghat_1W
+# compute IPTW
+Psi_hat_iptw <- mean(
+  ((las_vegas$star_intervention == 1) / ghat_1W - 
+   (las_vegas$star_intervention == 0) / ghat_0W) * las_vegas$open_2019)
+# compute the sIPTW
+mean_ghat_1W <- mean((las_vegas$star_intervention == 1) / ghat_1W)
+mean_ghat_0W <- mean((las_vegas$star_intervention == 0) / ghat_0W)
+Psi_hat_siptw <- mean(
+  (((las_vegas$star_intervention == 1) / ghat_1W)/mean_ghat_1W - 
+   ((las_vegas$star_intervention == 0) / ghat_0W)/mean_ghat_0W) *
+    las_vegas$open_2019)
+
+```
+
+
+The results:
+$\hat{\Psi}_{IPTW}(P_n) = $ `r round(Psi_hat_iptw, 3)`  
+$\hat{\Psi}_{sIPTW}(P_n) = $ `r round(Psi_hat_siptw, 3)`
+
+Finally, the TMLE estimate is computed using the SuperLearner. Errors arise from
+near practical positivity assumption violations.  
+
+```{r superlearner_tmle, message=FALSE, warning=FALSE, error=FALSE}
+# define the dataframe
+obs_df <- las_vegas %>% 
+  dplyr::select(american, chain, age_binary, review_binary,
+         star_intervention, open_2019) %>%
+  as.data.frame
+# run the ltmle function
+tmle_sl <- ltmle(data = obs_df, Anodes = "star_intervention",
+                 Ynodes = "open_2019", abar = list(1, 0), SL.library = sl_lib)
+summary(tmle_sl)  
+
+```
+
+
+
