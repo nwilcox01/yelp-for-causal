@@ -111,13 +111,15 @@ IPTW_or
 
 Provide some formal assessment of the positivity assumption. Evaluate the distribution of your estimated propensity score $g_n(A = 1|W_i), i = 1, ..., n,$ and corresponding non-stabilized weights (as well as of your stabilized weights if you use stabilized weights to fit an MSM). Consider evaluating sensitivity to different truncation levels for gn. Note that for TMLE, bounding or truncating gn away from 0 is recommended on the basis of both theory and finite sample performance; for IPTW it can help or hurt. Report how for how many observations was $g_n(A|Wi)$ truncated. 
 
+$$O = (W_{age}, W_{type}, W_{reviews}, W_{chain}, A, Y) \sim \mathbb{P}_0$$
+
 
 ```{r}
 # convert to data frame
 wt <- as.data.frame(wt)
 
 # look at distribution of weights
-ggplot(wt, aes(wt)) + geom_histogram(fill = "blue", col = "black") + theme_minimal() + 
+ggplot(wt, aes(wt)) + geom_histogram(fill = "red3", col = "black") + theme_minimal() + 
   labs(title = "Distribution of weights")
 
 # truncate large weights ARBITRARILY at 4
@@ -140,6 +142,17 @@ wt.trunc[ wt.trunc > 5] = 5
 IPTW.tr5 <- mean(wt.trunc*as.numeric(las_vegas$star_intervention==1)*las_vegas$open_2019) -
   mean(wt.trunc*as.numeric(las_vegas$star_intervention==0)*las_vegas$open_2019)
 IPTW.tr5
+
+# practical positivity assumption check
+# use the table function to examine support in exposure-covariate strata
+# example: table(ObsData$W1,ObsData$W2, ObsData$A)
+# all four covariates: age, review, chain, american, with EXPOSURE stars
+table(las_vegas$age_binary, las_vegas$review_binary, las_vegas$chain, las_vegas$american,
+      las_vegas$star_intervention)
+# top table corresponds to no exposure (stars < 3.5) A=0, and bottom table corresponds to exposure (stars >= 3.5) A=1
+# the rows correspond to W1-4
+# There are certain covariate combinations with *little* in the exposure.  
+
 
 ```
 
@@ -247,6 +260,7 @@ tmle_sl <- ltmle(data = obs_df, Anodes = "star_intervention",
 summary(tmle_sl)  
 
 ```
+
 
 
 
